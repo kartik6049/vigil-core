@@ -7,6 +7,7 @@ export function createLiveView({ store, api, navigate, toast }) {
   let root, canvas, detail, d3, resizeObs, tick;
   let pts = []; // screen positions of drawn dots, for hit-testing
   let hover = null;
+  let pinned = false; // a click or tap keeps the details (and the Open case button) on screen
   let destroyed = false;
 
   const schedule = rafBatch(draw);
@@ -108,7 +109,7 @@ export function createLiveView({ store, api, navigate, toast }) {
   function showDetail(p) {
     hover = p ? p.t.id : null;
     if (!p) {
-      setHtml(detail, html`<span class="muted">Hover a dot (or tap on a phone) for details.</span>`);
+      setHtml(detail, html`<span class="muted">Hover a dot for details. Click or tap a dot to keep it open.</span>`);
     } else {
       const t = p.t;
       setHtml(
@@ -167,13 +168,20 @@ export function createLiveView({ store, api, navigate, toast }) {
       if (destroyed) return;
       await document.fonts.ready;
 
+      // Hovering previews a dot, but only while nothing is pinned, so moving the mouse towards
+      // the "Open case" button does not make it disappear.
       canvas.addEventListener('pointermove', (ev) => {
-        if (ev.pointerType === 'mouse') showDetail(nearest(ev));
+        if (ev.pointerType === 'mouse' && !pinned) showDetail(nearest(ev));
       });
       canvas.addEventListener('pointerleave', (ev) => {
-        if (ev.pointerType === 'mouse') showDetail(null);
+        if (ev.pointerType === 'mouse' && !pinned) showDetail(null);
       });
-      canvas.addEventListener('click', (ev) => showDetail(nearest(ev))); // tap on touch devices
+      // Click or tap on a dot pins it; click or tap on empty space releases it.
+      canvas.addEventListener('click', (ev) => {
+        const p = nearest(ev);
+        pinned = Boolean(p);
+        showDetail(p);
+      });
       resizeObs = new ResizeObserver(schedule);
       resizeObs.observe(canvas);
       tick = setInterval(schedule, 1000); // slides the 30-minute window

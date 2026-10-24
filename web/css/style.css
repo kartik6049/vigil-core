@@ -170,6 +170,8 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--g3); pa
   .side-foot .stream-state { margin: 0; }
   main { padding: 20px 16px 48px; }
   canvas.live { height: 340px; }
+  /* tables scroll sideways inside .table-wrap instead of wrapping into tall, narrow cells */
+  .table-wrap td, .table-wrap th { white-space: nowrap; }
   canvas.geo { height: 420px; }
   .login { padding: 24px 16px; }
   #toast { right: 16px; left: 16px; bottom: 16px; max-width: none; }
