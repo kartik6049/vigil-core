@@ -60,7 +60,7 @@ npm test
 
 The map on the Geography page needs an India boundary file; see `web/data/README.md`. Without it the page still works on a plain frame.
 
-## Design decisions worth explaining
+## Design decisions
 
 **Two database roles.** The owner role runs migrations, grants and seed. The API connects as `vigil_app`, which can read and write the working tables but only `SELECT` and `INSERT` on `audit_log`. A trigger also rejects `UPDATE` and `DELETE` on `audit_log` for everyone, including the owner, so the log is append-only even if the application is compromised or has a bug.
 
