@@ -1,0 +1,49 @@
+name: simulate
+# Sends a small batch of SYNTHETIC transactions on a schedule so the live demo has activity.
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      count:
+        description: Transactions to send
+        default: '40'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: simulate
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: simulator/requirements.txt
+      - run: pip install -r simulator/requirements.txt
+      # Delayed fraud labels must survive between runs. A cache entry is immutable, so each run
+      # saves under a new key and the next restores the newest one by prefix.
+      - name: Restore pending labels
+        uses: actions/cache/restore@v4
+        with:
+          path: pending_labels.json
+          key: pending-labels-none
+          restore-keys: pending-labels-
+      - name: Simulate
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+          SIM_COUNT: ${{ inputs.count || '40' }}
+        run: python simulator/simulate.py
+      - name: Save pending labels
+        uses: actions/cache/save@v4
+        with:
+          path: pending_labels.json
+          key: pending-labels-${{ github.run_id }}

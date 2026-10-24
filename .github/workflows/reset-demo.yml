@@ -1,0 +1,25 @@
+name: reset-demo
+# Clears demo activity nightly and restores the seed state, so the public demo stays tidy.
+on:
+  schedule:
+    - cron: '30 21 * * *'   # 03:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Reset
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}   # owner connection string (not the app role)
+        run: npx tsx db/reset-demo.ts

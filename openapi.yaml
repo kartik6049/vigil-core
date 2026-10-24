@@ -1,0 +1,783 @@
+openapi: 3.0.3
+info:
+  title: Vigil Core API
+  version: 1.0.0
+  description: |
+    REST API for Vigil, a fraud and risk operations console for a **simulated** Indian payments company.
+    All data is synthetic.
+
+    **Conventions**
+    - Auth: `Authorization: Bearer <JWT>` (1-hour expiry), roles `analyst` and `admin`.
+      Machine callers (the simulator) use `X-Service-Key` instead.
+    - Timestamps are ISO 8601 UTC. Money is a decimal string in rupees (`"18500.00"`).
+    - Lists use cursor pagination: `?cursor=&limit=` and return `{ items, next_cursor }`
+      (`next_cursor` is `null` on the last page).
+    - Errors always look like `{ "error": { "code": "...", "message": "..." } }`.
+    - `409 Conflict` means a case was already claimed or changed by someone else.
+    - Scores and bands: low < 0.30, medium 0.30-0.70, high >= 0.70.
+servers:
+  - url: http://localhost:3000
+    description: Local
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Transactions
+  - name: Cases
+  - name: Stats
+  - name: Admin
+  - name: Stream
+
+paths:
+  /health:
+    get:
+      tags: [Auth]
+      summary: Liveness and database check
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string, example: ok } } }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in
+      description: Rate limited to 10 attempts per 15 minutes per IP (429 afterwards).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, example: analyst@demo }
+                password: { type: string }
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      responses:
+        '200':
+          description: The signed-in user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /transactions:
+    post:
+      tags: [Transactions]
+      summary: Ingest a transaction
+      description: |
+        Scores the transaction (ML service, or the built-in stub), runs the enabled rules, and opens a case
+        if the model band is high **or** any rule fires (priority 1 if both, otherwise 2).
+        If the ML service fails or takes over 800 ms, rules still run and the reasons include
+        `{ "source": "system", "feature": "model_unavailable" }`.
+
+        **Idempotent on `external_ref`:** the first call returns 201; repeats return 200 with `duplicate: true`
+        and the original result.
+      security:
+        - serviceKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IngestRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IngestResponse' }
+        '200':
+          description: Already processed (duplicate external_ref)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IngestResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '422':
+          description: Unknown account, or from and to are the same account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      tags: [Transactions]
+      summary: List transactions, newest first
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/TxnStatus' } }
+        - { name: band, in: query, schema: { $ref: '#/components/schemas/RiskBand' } }
+        - { name: from, in: query, description: Inclusive lower bound on created_at, schema: { type: string, format: date-time } }
+        - { name: to, in: query, description: Inclusive upper bound on created_at, schema: { type: string, format: date-time } }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: A page of transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Transaction' } }
+                  next_cursor: { type: string, nullable: true }
+
+  /transactions/{id}:
+    get:
+      tags: [Transactions]
+      summary: Transaction detail with reasons, accounts and linked case
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: Detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionDetail' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /accounts:
+    get:
+      tags: [Transactions]
+      summary: List accounts (user token or service key)
+      description: Not part of the original contract; the simulator uses it to discover account ids.
+      security:
+        - bearerAuth: []
+        - serviceKey: []
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: A page of accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Account' } }
+                  next_cursor: { type: string, nullable: true }
+
+  /accounts/{id}:
+    get:
+      tags: [Transactions]
+      summary: One account
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: The account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /accounts/{id}/transactions:
+    get:
+      tags: [Transactions]
+      summary: An account's recent outgoing transactions, newest first
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 20 } }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: A page of transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Transaction' } }
+                  next_cursor: { type: string, nullable: true }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /cases:
+    get:
+      tags: [Cases]
+      summary: Case queue
+      description: Default `status=active` returns open and in-review cases ordered by priority, then age.
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, open, in_review, blocked, cleared], default: active }
+        - { name: priority, in: query, schema: { type: integer, minimum: 1, maximum: 5 } }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: A page of cases
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Case' } }
+                  next_cursor: { type: string, nullable: true }
+
+  /cases/next:
+    post:
+      tags: [Cases]
+      summary: Atomically claim the next open case (analyst)
+      description: |
+        Picks the highest-priority, oldest open case using `FOR UPDATE SKIP LOCKED`, so two analysts
+        never receive the same case. Returns 404 `no_open_cases` when the queue is empty.
+      responses:
+        '200':
+          description: The claimed case (status `in_review`, assigned to you)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /cases/{id}:
+    get:
+      tags: [Cases]
+      summary: One case
+      description: Not part of the original contract; used by the case detail view.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /cases/{id}/claim:
+    post:
+      tags: [Cases]
+      summary: Claim a specific case (analyst)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: Claimed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: Already claimed or resolved (`already_claimed`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /cases/{id}/resolve:
+    post:
+      tags: [Cases]
+      summary: Block or clear a case you have claimed (analyst)
+      description: |
+        One database transaction: lock the case, check `version` and assignee, update the case and the
+        transaction, block the account if the decision is `blocked`, write the audit rows, commit.
+        Any failed check returns 409 and changes nothing:
+        `version_conflict`, `not_in_review`, `not_assignee`.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, note, version]
+              properties:
+                decision: { type: string, enum: [blocked, cleared] }
+                note: { type: string, minLength: 3, maxLength: 1000 }
+                version: { type: integer, description: The case version you last saw }
+      responses:
+        '200':
+          description: Resolved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Case' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /stats/overview:
+    get:
+      tags: [Stats]
+      summary: Headline KPIs
+      parameters:
+        - { name: range, in: query, schema: { type: string, enum: [1h, 6h, 24h, 7d, 30d], default: 24h } }
+      responses:
+        '200':
+          description: KPIs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  range: { type: string }
+                  since: { type: string, format: date-time }
+                  txn_count: { type: integer }
+                  flagged_count: { type: integer }
+                  blocked_amount: { type: string, example: '1250000.00' }
+                  open_cases: { type: integer }
+                  median_time_to_resolve_seconds: { type: number, nullable: true }
+
+  /stats/hourly:
+    get:
+      tags: [Stats]
+      summary: Hourly roll-up from the materialized view
+      description: Refreshed every 5 minutes, so the latest hour can lag slightly. Maximum range 31 days.
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: Hourly buckets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        hour: { type: string, format: date-time }
+                        txn_count: { type: integer }
+                        flagged_count: { type: integer }
+                        blocked_amount: { type: string }
+                        avg_risk: { type: number, nullable: true }
+
+  /stats/merchants:
+    get:
+      tags: [Stats]
+      summary: Flag rate by merchant category
+      description: '`flag_rate` is flagged / total. `confirmed_fraud_count` comes from delayed ground-truth labels, so it lags.'
+      parameters:
+        - { name: range, in: query, schema: { type: string, enum: [1h, 6h, 24h, 7d, 30d], default: 7d } }
+      responses:
+        '200':
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  range: { type: string }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        category: { type: string }
+                        txn_count: { type: integer }
+                        flagged_count: { type: integer }
+                        flag_rate: { type: number }
+                        confirmed_fraud_count: { type: integer }
+
+  /stats/cities:
+    get:
+      tags: [Stats]
+      summary: Flagged transactions by city
+      parameters:
+        - { name: range, in: query, schema: { type: string, enum: [1h, 6h, 24h, 7d, 30d], default: 24h } }
+      responses:
+        '200':
+          description: Cities with at least one flagged transaction
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  range: { type: string }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        city: { type: string }
+                        flagged_count: { type: integer }
+                        blocked_count: { type: integer }
+                        txn_count: { type: integer }
+
+  /model/metrics:
+    get:
+      tags: [Stats]
+      summary: Daily model quality and drift metrics
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: Metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        day: { type: string, format: date }
+                        model_version: { type: string }
+                        precision_at_t: { type: number, nullable: true }
+                        recall_at_t: { type: number, nullable: true }
+                        pr_auc: { type: number, nullable: true }
+                        psi_amount: { type: number, nullable: true }
+                        psi_score: { type: number, nullable: true }
+
+  /audit:
+    get:
+      tags: [Admin]
+      summary: Audit log, newest first (admin)
+      parameters:
+        - { name: actor_id, in: query, schema: { type: string, format: uuid } }
+        - { name: entity_type, in: query, schema: { type: string } }
+        - { name: entity_id, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: A page of audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/AuditEntry' } }
+                  next_cursor: { type: string, nullable: true }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /rules:
+    get:
+      tags: [Admin]
+      summary: List rules (admin)
+      responses:
+        '200':
+          description: Rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Rule' } }
+
+  /rules/{id}:
+    patch:
+      tags: [Admin]
+      summary: Enable, disable or tune a rule (admin)
+      description: Parameters are validated per rule. Writes an audit row with before and after values.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                params: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Updated rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rule' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /devices/register:
+    post:
+      tags: [Admin]
+      summary: Save an FCM token for push alerts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fcm_token]
+              properties:
+                fcm_token: { type: string }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+
+  /ground-truth:
+    post:
+      tags: [Admin]
+      summary: Submit delayed fraud labels (service key)
+      description: Not part of the original contract. The simulator's stand-in for a chargeback feed. Idempotent per transaction.
+      security:
+        - serviceKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [labels]
+              properties:
+                labels:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [external_ref, is_fraud]
+                    properties:
+                      external_ref: { type: string }
+                      is_fraud: { type: boolean }
+                      reported_at: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received: { type: integer }
+                  inserted: { type: integer }
+
+  /stream:
+    get:
+      tags: [Stream]
+      summary: Server-Sent Events
+      description: |
+        Keep-alive stream (`text/event-stream`). Authenticate with the normal `Authorization` header, so use
+        `fetch` streaming or OkHttp SSE rather than the browser `EventSource` (which cannot send headers).
+
+        Events (`data` is JSON):
+        - `txn.new`: every ingested transaction (a `Transaction`)
+        - `txn.flagged`: a flagged transaction: `{ transaction, case: { id, priority, status } }`
+        - `case.updated`: a case was claimed or resolved (a `Case`)
+
+        Lines starting with `:` are heartbeats.
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    serviceKey: { type: apiKey, in: header, name: X-Service-Key }
+
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+    Cursor: { name: cursor, in: query, description: Opaque value from a previous `next_cursor`, schema: { type: string } }
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: version_conflict }
+            message: { type: string }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [analyst, admin] }
+
+    RiskBand: { type: string, enum: [low, medium, high] }
+    TxnStatus: { type: string, enum: [approved, flagged, blocked, cleared] }
+
+    Reason:
+      description: |
+        One reason a transaction scored or flagged the way it did. Discriminated by `source`:
+        `model` (feature + contribution), `rule` (rule name + detail) or `system`
+        (`model_unavailable`, `account_blocked`).
+      oneOf:
+        - type: object
+          required: [source, feature, value, contribution]
+          properties:
+            source: { type: string, enum: [model] }
+            feature: { type: string, example: amount }
+            value: { type: number }
+            contribution: { type: number }
+        - type: object
+          required: [source, rule, detail]
+          properties:
+            source: { type: string, enum: [rule] }
+            rule: { type: string, example: velocity_5_in_10m }
+            detail: { type: string }
+        - type: object
+          required: [source, feature]
+          properties:
+            source: { type: string, enum: [system] }
+            feature: { type: string, enum: [model_unavailable, account_blocked] }
+
+    Account:
+      type: object
+      properties:
+        id: { type: integer }
+        holder_name: { type: string }
+        kind: { type: string, enum: [customer, merchant] }
+        merchant_category: { type: string, nullable: true }
+        city: { type: string }
+        status: { type: string, enum: [active, blocked] }
+
+    IngestRequest:
+      type: object
+      required: [external_ref, from_account_id, to_account_id, type, channel, amount]
+      properties:
+        external_ref: { type: string, description: Idempotency key chosen by the sender }
+        from_account_id: { type: integer }
+        to_account_id: { type: integer }
+        type: { type: string, enum: [PAYMENT, TRANSFER, CASH_OUT, CASH_IN, DEBIT] }
+        channel: { type: string, enum: [UPI, CARD, NETBANKING, WALLET] }
+        amount: { type: string, example: '18500.00', description: A number is also accepted }
+        old_balance_orig: { type: string, nullable: true }
+        new_balance_orig: { type: string, nullable: true }
+        old_balance_dest: { type: string, nullable: true }
+        new_balance_dest: { type: string, nullable: true }
+        ip_city: { type: string, nullable: true }
+        device_id: { type: string, nullable: true }
+        created_at: { type: string, format: date-time, description: Defaults to now; used by the simulator to back-date }
+
+    IngestResponse:
+      type: object
+      properties:
+        transaction: { $ref: '#/components/schemas/Transaction' }
+        case:
+          nullable: true
+          type: object
+          properties:
+            id: { type: integer }
+            priority: { type: integer }
+            status: { type: string }
+        duplicate: { type: boolean }
+
+    Transaction:
+      type: object
+      properties:
+        id: { type: integer }
+        external_ref: { type: string }
+        from_account_id: { type: integer }
+        to_account_id: { type: integer }
+        type: { type: string }
+        channel: { type: string }
+        amount: { type: string, example: '18500.00' }
+        old_balance_orig: { type: string, nullable: true }
+        new_balance_orig: { type: string, nullable: true }
+        old_balance_dest: { type: string, nullable: true }
+        new_balance_dest: { type: string, nullable: true }
+        ip_city: { type: string, nullable: true }
+        device_id: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        risk_score: { type: number, nullable: true, description: Null when the model was unavailable }
+        risk_band: { type: string, nullable: true, enum: [low, medium, high, null] }
+        model_version: { type: string, nullable: true }
+        reasons: { type: array, items: { $ref: '#/components/schemas/Reason' } }
+        status: { $ref: '#/components/schemas/TxnStatus' }
+
+    TransactionDetail:
+      allOf:
+        - $ref: '#/components/schemas/Transaction'
+        - type: object
+          properties:
+            from_account: { $ref: '#/components/schemas/Account' }
+            to_account: { $ref: '#/components/schemas/Account' }
+            case:
+              nullable: true
+              type: object
+              properties:
+                id: { type: integer }
+                status: { type: string }
+                priority: { type: integer }
+                version: { type: integer }
+
+    Case:
+      type: object
+      properties:
+        id: { type: integer }
+        transaction_id: { type: integer }
+        status: { type: string, enum: [open, in_review, blocked, cleared] }
+        priority: { type: integer, description: 1 is highest }
+        assigned_to: { type: string, format: uuid, nullable: true }
+        assigned_to_name: { type: string, nullable: true }
+        opened_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        resolution_note: { type: string, nullable: true }
+        version: { type: integer, description: Send this back when resolving (optimistic locking) }
+        transaction:
+          type: object
+          properties:
+            id: { type: integer }
+            amount: { type: string }
+            type: { type: string }
+            channel: { type: string }
+            risk_score: { type: number, nullable: true }
+            risk_band: { type: string, nullable: true }
+            status: { type: string }
+            created_at: { type: string, format: date-time }
+            reasons: { type: array, items: { $ref: '#/components/schemas/Reason' } }
+            from_account_id: { type: integer }
+            to_account_id: { type: integer }
+            ip_city: { type: string, nullable: true }
+
+    Rule:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string, example: velocity_5_in_10m }
+        params: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
+
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer }
+        actor_id: { type: string, format: uuid, nullable: true }
+        actor_email: { type: string, nullable: true }
+        actor_name: { type: string, nullable: true }
+        action: { type: string, example: case.block }
+        entity_type: { type: string }
+        entity_id: { type: string }
+        before: { type: object, nullable: true, additionalProperties: true }
+        after: { type: object, nullable: true, additionalProperties: true }
+        created_at: { type: string, format: date-time }

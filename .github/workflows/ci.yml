@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vigil
+          POSTGRES_PASSWORD: vigil
+          POSTGRES_DB: vigil_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vigil -d vigil_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://vigil:vigil@localhost:5432/vigil_test
+      TEST_APP_DATABASE_URL: postgres://vigil_app:vigil_app@localhost:5432/vigil_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # The app role is created here (Docker Compose does it locally) so the grants test can run.
+      - name: Create app role
+        run: psql postgres://vigil:vigil@localhost:5432/vigil_test -c "create role vigil_app login password 'vigil_app'"
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test

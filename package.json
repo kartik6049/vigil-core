@@ -1,0 +1,37 @@
+{
+  "name": "vigil-core",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "workspaces": ["api"],
+  "scripts": {
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d --wait",
+    "db:migrate": "node --env-file=.env ./node_modules/.bin/node-pg-migrate -m db/migrations up",
+    "db:rollback": "node --env-file=.env ./node_modules/.bin/node-pg-migrate -m db/migrations down",
+    "db:grants": "tsx --env-file=.env db/apply-sql.ts db/grants.sql",
+    "db:seed": "tsx --env-file=.env db/seed.ts",
+    "db:setup": "npm run db:migrate && npm run db:grants && npm run db:seed",
+    "db:reset-demo": "tsx --env-file=.env db/reset-demo.ts",
+    "dev": "npm run dev -w api",
+    "build": "npm run build -w api",
+    "start": "npm run start -w api",
+    "typecheck": "npm run typecheck -w api && tsc --noEmit -p tsconfig.json",
+    "lint": "npm run lint -w api",
+    "test": "npm test -w api",
+    "web": "npx http-server web -p 8080 -c-1"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "node-pg-migrate": "^8.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
